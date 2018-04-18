@@ -1,0 +1,8 @@
+/.secrets
+/.terraform
+/.vagrant
+/bin
+/*.log
+/plan
+/*.tfstate
+/*.tfstate.backup
