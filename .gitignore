@@ -6,3 +6,5 @@
 /plan
 /*.tfstate
 /*.tfstate.backup
+/terraform.tfvars
+/provision/bin
