@@ -1,49 +1,119 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-$script = <<SCRIPT
-echo "Installing dependencies ..."
-sudo apt-get update
-sudo apt-get install -y unzip curl jq
-echo "Determining Consul version to install ..."
-CHECKPOINT_URL="https://checkpoint-api.hashicorp.com/v1/check"
-if [ -z "$CONSUL_DEMO_VERSION" ]; then
-    CONSUL_DEMO_VERSION=$(curl -s "${CHECKPOINT_URL}"/consul | jq .current_version | tr -d '"')
-fi
-echo "Fetching Consul version ${CONSUL_DEMO_VERSION} ..."
-cd /tmp/
-curl -s https://releases.hashicorp.com/consul/${CONSUL_DEMO_VERSION}/consul_${CONSUL_DEMO_VERSION}_linux_amd64.zip -o consul.zip
-echo "Installing Consul version ${CONSUL_DEMO_VERSION} ..."
-unzip consul.zip
-sudo chmod +x consul
-sudo mv consul /usr/bin/consul
-SCRIPT
+def vault_server (docker)
+  docker.run "vault",
+    cmd: "vault server -dev",
+    args: "--net=host"
+end
 
-# Specify a Consul version
-CONSUL_DEMO_VERSION = ENV['CONSUL_DEMO_VERSION']
+def consul_server (docker, address, extra_args = "")
+  docker.run "consul",
+    cmd: """consul agent \
+        -server \
+        -bind=#{address} \
+        -data-dir=/consul/data \
+        -bootstrap-expect=3 \
+        -retry-join=load-balancer \
+        #{extra_args}
+    """,
+    args: "--net=host"
+end
 
-# Specify a custom Vagrant box for the demo
-DEMO_BOX_NAME = ENV['DEMO_BOX_NAME'] || "ubuntu/xenial64"
+def nomad_server (docker, address, extra_args = "")
+  docker.run "nomad-server",
+    image: "djenriquez/nomad",
+    cmd: "agent --config=/etc/nomad.d/server.hcl",
+    args: """ \
+      --net=host \
+      --volume '/vagrant/nomad.d:/etc/nomad.d' \
+      --volume '/opt/nomad:/opt/nomad' \
+      --volume '/var/run/docker.sock:/var/run/docker.sock' \
+      #{extra_args} \
+    """
+end
 
-# Vagrantfile API/syntax version.
-# NB: Don't touch unless you know what you're doing!
-VAGRANTFILE_API_VERSION = "2"
+def nomad_client (docker, address, extra_args = "")
+  docker.run "nomad-client",
+    image: "djenriquez/nomad",
+    cmd: "agent --config=/etc/nomad.d/client.hcl",
+    args: """ \
+      --net=host \
+      --volume '/vagrant/nomad.d:/etc/nomad.d' \
+      --volume '/opt/nomad:/opt/nomad' \
+      --volume '/var/run/docker.sock:/var/run/docker.sock' \
+      #{extra_args} \
+    """
+end
 
-Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
-  config.vm.box = DEMO_BOX_NAME
-
-  config.vm.provision "shell",
-    inline: $script,
-    env: {'CONSUL_DEMO_VERSION' => CONSUL_DEMO_VERSION}
-
-  config.vm.define "n1" do |n1|
-      n1.vm.hostname = "n1"
-      n1.vm.network "private_network", ip: "172.20.20.10"
-      config.vm.network "forwarded_port", guest: 8500, host: 8500
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/xenial64"
+  config.vm.provision :hosts do |hosts|
+    hosts.autoconfigure = true
+    hosts.sync_hosts = true
   end
 
-  config.vm.define "n2" do |n2|
-      n2.vm.hostname = "n2"
-      n2.vm.network "private_network", ip: "172.20.20.11"
+  config.ssh.forward_agent = true
+
+  config.vm.define "bastion", primary: true do |node|
+    address = "10.0.0.101"
+
+    node.vm.network :private_network, ip: address
+    node.vm.hostname = "bastion"
+
+    node.vm.provision :docker do |docker|
+      consul_server docker, address
+      nomad_server docker, address
+      nomad_client docker, address
+    end
   end
+
+  config.vm.define "api" do |node|
+    address = "10.0.0.103"
+    node.vm.network :private_network, ip: address
+    node.vm.hostname = "api"
+
+    node.vm.provision :docker do |docker|
+      consul_server docker, address
+      nomad_server docker, address
+      nomad_client docker, address
+    end
+  end
+
+  config.vm.define "db" do |node|
+    address = "10.0.0.104"
+
+    node.vm.network :private_network, ip: address
+    node.vm.hostname = "db"
+
+    node.vm.provision :docker do |docker|
+      consul_server docker, address
+      nomad_server docker, address
+      nomad_client docker, address
+    end
+  end
+
+  config.vm.define "load-balancer" do |node|
+    address = "10.0.0.102"
+
+    node.vm.network :forwarded_port, guest: 9999, host: 9999 # Fabio LB
+    node.vm.network :forwarded_port, guest: 9998, host: 9998 # Fabio UI
+    node.vm.network :forwarded_port, guest: 8500, host: 8500 # Consul
+    node.vm.network :forwarded_port, guest: 4646, host: 4646 # Nomad
+
+    node.vm.network :private_network, ip: address
+    node.vm.hostname = "load-balancer"
+
+    node.vm.provision :docker do |docker|
+      # consul_server docker, address, "-ui -client=#{address}"
+      consul_server docker, address, "-ui -client=0.0.0.0"
+      nomad_server docker, address
+      nomad_client docker, address
+
+      docker.run "fabiolb/fabio",
+        args: "--net=host",
+        name: "fabio"
+    end
+  end
+
 end
