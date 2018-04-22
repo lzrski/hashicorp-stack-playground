@@ -14,6 +14,15 @@ data "template_file" "consul-service" {
   template = "${file("templates/consul.service.tpl")}"
 }
 
+data "template_file" "nomad-config" {
+  template = "${file("templates/nomad-config.hcl.tpl")}"
+}
+
+data "template_file" "nomad-service" {
+  template = "${file("templates/nomad.service.tpl")}"
+}
+
+
 # resource "digitalocean_droplet" "base" {
 #   # This droplet is used to make a base image for quick rebuilds.
 #   # After creating it, power it off, go to DigitlOcean dashboard and take a snapshot.
@@ -43,6 +52,8 @@ data "template_file" "consul-service" {
 #       "chmod a+x /usr/local/sbin/nomad",
 #       "mkdir -p /etc/consul.d",
 #       "mkdir -p /var/consul/data",
+#       "mkdir -p /etc/nomad.d",
+#       "mkdir -p /var/nomad/data",
 #     ]
 #   }
 # }
@@ -52,38 +63,75 @@ data "digitalocean_image" "prime" {
 }
 
 resource "digitalocean_droplet" "prime" {
- count  = 3
- image  = "${data.digitalocean_image.prime.image}"
- name   = "${format("%s-%02d-%s", "prime", count.index + 1, var.region)}"
- region = "${var.region}"
- size   = "512mb"
- ssh_keys = [ "${var.ssh_fingerprint}" ]
- private_networking = true
+  count  = 3
+  image  = "${data.digitalocean_image.prime.image}"
+  name   = "${format("%s-%02d-%s", "prime", count.index + 1, var.region)}"
+  region = "${var.region}"
+  size   = "512mb"
+  ssh_keys = [ "${var.ssh_fingerprint}" ]
+  private_networking = true
 
- provisioner "file" {
-   content = "${data.template_file.consul-service.rendered}"
-   destination = "/etc/systemd/system/consul.service"
- }
+  provisioner "remote-exec" {
+    inline = [
+      "mkdir -p /etc/consul.d",
+      "mkdir -p /var/consul/data",
+      "mkdir -p /etc/nomad.d",
+      "mkdir -p /var/nomad/data",
+    ]
+  }
 
- provisioner "file" {
-   content = "${data.template_file.consul-config.rendered}"
-   destination = "/etc/consul.d/server.json"
- }
 
- # This is a custom configuration for each particular droplet
- # The tricky part is that each node needs to bind to it's own private IP address and exactly one needs to be in bootstrap mode.
- # TODO: Why can't I use templates for this? Can I?
- provisioner "file" {
-   content = "{ \"bind_addr\": \"${ self.ipv4_address_private }\", \"bootstrap\": ${ count.index == 0 }  }"
-   destination = "/etc/consul.d/custom.json"
- }
+  # Consul service and configuration
 
- provisioner "remote-exec" {
-   inline = [
-     "systemctl enable consul.service",
-     "systemctl start consul.service"
-   ]
- }
+  provisioner "file" {
+    content = "${data.template_file.consul-service.rendered}"
+    destination = "/etc/systemd/system/consul.service"
+   }
+
+  provisioner "file" {
+    content = "${data.template_file.consul-config.rendered}"
+    destination = "/etc/consul.d/server.json"
+  }
+
+  # This is a custom configuration for each particular droplet
+  # The tricky part is that each node needs to bind to it's own private IP   address and exactly one needs to be in bootstrap mode.
+  # TODO: Why can't I use templates for this? Can I?
+  provisioner "file" {
+    content = "{ \"bind_addr\": \"${ self.ipv4_address_private }\", \"bootstrap\": ${ count.index == 0 }  }"
+    destination = "/etc/consul.d/custom.json"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "systemctl enable consul.service",
+      "systemctl start consul.service"
+    ]
+  }
+
+  provisioner "file" {
+    content = "${data.template_file.nomad-service.rendered}"
+    destination = "/etc/systemd/system/nomad.service"
+  }
+
+  provisioner "file" {
+    content = "${data.template_file.nomad-config.rendered}"
+    destination = "/etc/nomad.d/server.hcl"
+  }
+
+  # This is a custom configuration for each particular droplet
+  # The tricky part is that each node needs to bind to it's own private IP   address and exactly one needs to be in bootstrap mode.
+  # TODO: Why can't I use templates for this? Can I?
+  provisioner "file" {
+    content = "bind_addr = \"${ self.ipv4_address_private }\""
+    destination = "/etc/nomad.d/custom.hcl"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "systemctl enable nomad.service",
+      "systemctl start nomad.service"
+    ]
+  }
 }
 
 resource "null_resource" "consul-cluster" {
