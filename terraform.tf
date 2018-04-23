@@ -22,6 +22,13 @@ data "template_file" "nomad-service" {
   template = "${file("templates/nomad.service.tpl")}"
 }
 
+data "template_file" "vault-config" {
+  template = "${file("templates/vault-config.hcl.tpl")}"
+}
+
+data "template_file" "vault-service" {
+  template = "${file("templates/vault.service.tpl")}"
+}
 
 # resource "digitalocean_droplet" "base" {
 #   # This droplet is used to make a base image for quick rebuilds.
@@ -77,11 +84,12 @@ resource "digitalocean_droplet" "prime" {
       "mkdir -p /var/consul/data",
       "mkdir -p /etc/nomad.d",
       "mkdir -p /var/nomad/data",
+      "mkdir -p /etc/vault.d"
     ]
   }
 
 
-  # Consul service and configuration
+  # Consul service
 
   provisioner "file" {
     content = "${data.template_file.consul-service.rendered}"
@@ -108,6 +116,8 @@ resource "digitalocean_droplet" "prime" {
     ]
   }
 
+  # Nomad service
+
   provisioner "file" {
     content = "${data.template_file.nomad-service.rendered}"
     destination = "/etc/systemd/system/nomad.service"
@@ -130,6 +140,44 @@ resource "digitalocean_droplet" "prime" {
     inline = [
       "systemctl enable nomad.service",
       "systemctl start nomad.service"
+    ]
+  }
+
+  # Vault service
+
+  provisioner "file" {
+    content = "${data.template_file.vault-service.rendered}"
+    destination = "/etc/systemd/system/vault.service"
+  }
+
+  provisioner "file" {
+    content = "${data.template_file.vault-config.rendered}"
+    destination = "/etc/vault.d/server.hcl"
+  }
+
+  # This is a custom configuration for each particular droplet
+  # The tricky part is that each node needs to bind to it's own private IP   address and exactly one needs to be in bootstrap mode.
+  # TODO: Why can't I use templates for this? Can I?
+  provisioner "file" {
+    content = <<vaultconfig
+      listener "tcp" {
+        tls_disable = true
+        address = "0.0.0.0:8200"
+        cluster_address = "${ self.ipv4_address_private }:8200"
+      }
+      api_addr = "https://${ self.ipv4_address_private }:8200"
+      cluster_addr = "https://${ self.ipv4_address_private }:8201"
+    vaultconfig
+    destination = "/etc/vault.d/custom.hcl"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "wget https://releases.hashicorp.com/vault/0.10.0/vault_0.10.0_linux_amd64.zip",
+      "unzip vault_0.10.0_linux_amd64.zip",
+      "cp vault /usr/local/sbin/",
+      "systemctl enable vault.service",
+      "systemctl start vault.service"
     ]
   }
 }

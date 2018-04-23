@@ -1,0 +1,3 @@
+storage "consul" {
+  path = "vault"
+}
